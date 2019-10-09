@@ -4,7 +4,7 @@ rather than an endless stream of bytes, and adds support for compression.
 from rpyc.lib import safe_import
 from rpyc.lib.compat import Struct, BYTES_LITERAL
 from rpyc.core import brine
-import io
+import io, ctypes, threading
 zlib = safe_import("zlib")
 
 # * 64 bit length field?
@@ -44,6 +44,13 @@ class Channel(object):
     @max_io_chunk.setter
     def max_io_chunk(self, value): self.stream.max_io_chunk = value
 
+    @property
+    def raw_handler(self): return self.__rapid_io_context.raw_handler
+    @raw_handler.setter
+    def raw_handler(self, value): self.__rapid_io_context.raw_handler = value
+
+    def raw_write(self, *args, **kwargs): return self.__rapid_io_context.raw_write(*args, **kwargs)
+
     def close(self):
         """closes the channel and underlying stream"""
         self.stream.close()
@@ -78,6 +85,17 @@ class Channel(object):
         return self.__rapid_io_context.send(data)
 
     class __RapidIoContext(object):
+        @property
+        def raw_handler(self): return self.__raw_handler
+        @raw_handler.setter
+        def raw_handler(self, value): self.__raw_handler = value
+
+        def raw_write(self, data):
+            __data = memoryview(data).cast("B")
+            self.__channel.stream.write(self.__channel.FRAME_HEADER.pack(__data.nbytes, self.__Codes.RAW))
+            self.__channel.stream.write(data)
+            self.__channel.stream.write(self.__channel.FLUSHER)
+
         def recv(self):
             try:
                 __header = self.__channel.stream.read(self.__FRAME_HEADER_SIZE)
@@ -106,10 +124,13 @@ class Channel(object):
         def __init__(self, channel):
             object.__init__(self)
             self.__channel = channel
+            self.__raw_handler = None
+            self.__raw_read_mutex = threading.Lock()
             self.__FLUSHER_SIZE = len(channel.FLUSHER)
             self.__FRAME_HEADER_SIZE = channel.FRAME_HEADER.size
 
         class __Codes(object):
+            RAW = int((b"r").hex(), 16)
             NORMAL = int((b"n").hex(), 16)
             COMPRESSED = int((b"c").hex(), 16)
 
@@ -124,6 +145,74 @@ class Channel(object):
                 object.__init__(self)
                 self.__source = source
                 self.__counter = 0
+
+        class __RawReader(object):
+            size = property(lambda self: self.__size)
+            left = property(lambda self: self.__left)
+            state = property(lambda self: self.__state)
+            def skip(self, size = None):
+                if size is None: __total = self.__left
+                else:
+                    if not isinstance(size, int): raise TypeError("invalid size, positive integer expected")
+                    if not (0 <= size): raise ValueError("invalid size, positive integer expected")
+                    __total = min(self.__left, size)
+                if not (0 < __total): return 0
+                __left = __total
+                try:
+                    while 0 < __left:
+                        __expected = min(self.__BLACK_HOLE_SIZE, __left)
+                        __size = self.__readinto_impl(self.__BLACK_HOLE[:__expected])
+                        if __expected != __size: raise RuntimeError("broken stream")
+                        __left -= __size
+                except: self.__state = False; raise
+                self.__left -= __total
+                return __total
+            def read(self, size):
+                if not isinstance(size, int): raise TypeError("invalid size, positive integer expected")
+                if 0 == size: return memoryview(bytes())
+                if not (0 <= size): raise ValueError("invalid size, positive integer expected")
+                if not (0 < self.__left): return memoryview(bytes())
+                __expected = min(self.__left, size)
+                try:
+                    __data = self.__read_impl(__expected)
+                    if (__expected != __data.nbytes): raise RuntimeError("broken stream")
+                except: self.__state = False; raise
+                self.__left -= __expected
+                return __data
+            def readinto(self, destination):
+                __destination = memoryview(destination).cast("B")
+                __destination = __destination[:min(self.__left, __destination.nbytes)]
+                __expected = __destination.nbytes
+                try:
+                    __size = self.__readinto_impl(__destination)
+                    if __expected != __size: raise RuntimeError("broken stream")
+                except: self.__state = False; raise
+                self.__left -= __expected
+                return __size
+            __BLACK_HOLE = memoryview(ctypes.create_string_buffer(1024 * 1024)).cast("B")
+            __BLACK_HOLE_SIZE = __BLACK_HOLE.nbytes
+            def __readinto_impl(self, destination):
+                __destination = destination
+                __total = __destination.nbytes
+                with self.__mutex:
+                    while 0 < __destination.nbytes:
+                        __size = self.__stream.readinto(__destination)
+                        if 0 == __size: break
+                        if not (__size <= __destination.nbytes): raise RuntimeError("broken stream")
+                        __destination = __destination[__size:]
+                return __total - __destination.nbytes
+            def __read_impl(self, size):
+                if not (0 < size): return
+                __buffer = memoryview(ctypes.create_string_buffer(size)).cast("B")
+                self.__readinto_impl(__buffer)
+                return __buffer
+            def __init__(self, size, stream, mutex):
+                object.__init__(self)
+                self.__size = size
+                self.__left = size
+                self.__state = True
+                self.__mutex = mutex
+                self.__stream = stream
 
         def __try_send_compressed(self, brine_dump_result):
             if not self.__channel.compression: return False
@@ -151,6 +240,13 @@ class Channel(object):
                 __left -= __expected
             if 0 != __left: raise ValueError("data size mismatch")
 
+        def __handle_raw_data(self, size):
+            __handler = self.__raw_handler
+            __raw_reader = self.__RawReader(size, self.__channel.stream, self.__raw_read_mutex)
+            if not (__handler is None): __handler(__raw_reader)
+            __raw_reader.skip()
+            if not __raw_reader.state: raise RuntimeError("broken stream")
+
         def __handle_normal_data(self, size):
             __stream = self.__BrineLoadStream(self.__channel.stream)
             __data = brine._load(__stream)
@@ -162,6 +258,7 @@ class Channel(object):
             with io.BytesIO(zlib.decompress(self.__channel.stream.read(size))) as __stream: return brine._load(__stream)
 
         __recv_handlers_dictionary = {
+            __Codes.RAW: __handle_raw_data,
             __Codes.NORMAL: __handle_normal_data,
             __Codes.COMPRESSED : __handle_compressed_data
         }

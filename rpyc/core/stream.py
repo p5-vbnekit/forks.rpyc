@@ -84,6 +84,8 @@ class Stream(object):
         """
         raise NotImplementedError()
 
+    def readinto(self, destination): raise NotImplementedError()
+
     def write(self, data):
         """writes the entire *data*, or raise EOFError
 
@@ -276,6 +278,26 @@ class SocketStream(Stream):
             data.append(buf)
             count -= len(buf)
         return BYTES_LITERAL("").join(data)
+
+    def readinto(self, destination):
+        __offset = 0
+        __destination = memoryview(destination).cast("B")
+        while 0 < __destination.nbytes:
+            try: __size = self.sock.recv_into(__destination)
+            except socket.timeout: continue
+            except socket.error:
+                __exception = sys.exc_info()[1]
+                if get_exc_errno(__exception) in retry_errnos:
+                    # windows just has to be a bitch
+                    continue
+                self.close()
+                raise EOFError(__exception)
+            if not (0 < __size):
+                self.close()
+                raise EOFError("connection closed by peer")
+            __offset += __size
+            __destination = __destination[__size:]
+        return __offset
 
     def write(self, data):
         try:

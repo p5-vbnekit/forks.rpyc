@@ -212,6 +212,13 @@ class Connection(object):
     @max_io_chunk.setter
     def max_io_chunk(self, value): self._channel.max_io_chunk = value
 
+    @property
+    def raw_handler(self): return self._channel.raw_handler
+    @raw_handler.setter
+    def raw_handler(self, value): self._channel.raw_handler = value
+
+    def raw_write(self, *args, **kwargs): return self._channel.raw_write(*args, **kwargs)
+
     def close(self, _catchall=True):  # IO
         """closes the connection, releasing all held resources"""
         if self._closed:
