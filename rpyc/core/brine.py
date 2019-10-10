@@ -357,6 +357,32 @@ def _load(stream):
         return IMM_INTS_LOADER[tag]
     return _load_registry.get(tag)(stream)
 
+class __DumpStream(object):
+    @property
+    def result(self): return self.__Result(self.__size, self.__items)
+
+    def append(self, data):
+        __item = memoryview(data)
+        __size = __item.nbytes
+        self.__items.append(__item)
+        self.__size += __size
+
+    def __init__(self):
+        object.__init__(self)
+        self.__size = 0
+        self.__items = []
+
+    class __Result(object):
+        @property
+        def size(self): return self.__size
+        @property
+        def generator(self):
+            for __item in self.__items: yield __item
+        def __init__(self, size, items):
+            object.__init__(self)
+            self.__size = size
+            self.__items = items
+
 # ===============================================================================
 # API
 # ===============================================================================
@@ -369,9 +395,9 @@ def dump(obj):
 
     :returns: a byte-string representation of the object
     """
-    stream = []
-    _dump(obj, stream)
-    return b"".join(stream)
+    __stream = __DumpStream()
+    _dump(obj, __stream)
+    return __stream.result
 
 
 def load(data):

@@ -374,7 +374,7 @@ class Connection(object):
                             instantiate_oldstyle_exceptions=self._config["instantiate_oldstyle_exceptions"])
 
     def _dispatch(self, data):  # serving---dispatch?
-        msg, seq, args = brine.load(data)
+        msg, seq, args = data
         if msg == consts.MSG_REQUEST:
             self._dispatch_request(seq, args)
         elif msg == consts.MSG_REPLY:
