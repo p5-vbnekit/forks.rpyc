@@ -6,12 +6,12 @@ import sys
 import os
 import socket
 import errno
+import traceback
 from rpyc.lib import safe_import, Timeout, socket_backoff_connect
 from rpyc.lib.compat import poll, select_error, BYTES_LITERAL, get_exc_errno, maxint  # noqa: F401
 win32file = safe_import("win32file")
 win32pipe = safe_import("win32pipe")
 win32event = safe_import("win32event")
-
 
 retry_errnos = (errno.EAGAIN, errno.EWOULDBLOCK)
 
@@ -264,6 +264,7 @@ class SocketStream(Stream):
             try:
                 buf = self.sock.recv(min(self.max_io_chunk, count))
             except socket.timeout:
+                traceback.print_exc(file=sys.stderr)
                 continue
             except socket.error:
                 ex = sys.exc_info()[1]
@@ -280,11 +281,13 @@ class SocketStream(Stream):
         return BYTES_LITERAL("").join(data)
 
     def readinto(self, destination):
-        __offset = 0
         __destination = memoryview(destination).cast("B")
+        __total = __destination.nbytes
         while 0 < __destination.nbytes:
-            try: __size = self.sock.recv_into(__destination)
-            except socket.timeout: continue
+            try: __size = self.sock.recv_into(__destination, nbytes=min(self.max_io_chunk, __destination.nbytes))
+            except socket.timeout:
+                traceback.print_exc(file=sys.stderr)
+                continue
             except socket.error:
                 __exception = sys.exc_info()[1]
                 if get_exc_errno(__exception) in retry_errnos:
@@ -295,9 +298,8 @@ class SocketStream(Stream):
             if not (0 < __size):
                 self.close()
                 raise EOFError("connection closed by peer")
-            __offset += __size
             __destination = __destination[__size:]
-        return __offset
+        return __total
 
     def write(self, data):
         try:

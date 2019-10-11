@@ -362,10 +362,8 @@ class __DumpStream(object):
     def result(self): return self.__Result(self.__size, self.__items)
 
     def append(self, data):
-        __item = memoryview(data)
-        __size = __item.nbytes
-        self.__items.append(__item)
-        self.__size += __size
+        self.__items.append(data)
+        self.__size += len(data)
 
     def __init__(self):
         object.__init__(self)
@@ -376,8 +374,7 @@ class __DumpStream(object):
         @property
         def size(self): return self.__size
         @property
-        def generator(self):
-            for __item in self.__items: yield __item
+        def sequence(self): return tuple(self.__items)
         def __init__(self, size, items):
             object.__init__(self)
             self.__size = size
